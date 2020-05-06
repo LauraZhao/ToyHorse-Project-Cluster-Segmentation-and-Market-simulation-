@@ -1,0 +1,543 @@
+---
+title: "Toy Horse Case"
+author: "Team 2 - MSBA 2020"
+date: "2/9/2020"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(conjoint)
+library(cluster)
+library(fpc)
+library(factoextra)
+library(gridExtra)
+dir = "C:/Users/liujr/Downloads"
+setwd(dir)
+load("C:/Users/liujr/Downloads/GBA424 - Toy Horse Case Data.Rdata")
+
+
+```
+
+The first step is to use the conjoinData to perform individual level regressions and predict missing ratings (NAs).
+
+```{r predict NAs}
+#rename the conjoint data
+names(conjointData) = c('ID','profile','rating','price_low','height_26','motion_rocking','style_glamorous')
+
+model = list()
+for (i in 1:nrow(distinct(conjointData,ID))){
+    lm = lm(rating~ price_low+height_26+motion_rocking+style_glamorous,data = conjointData[conjointData$ID==i,])
+    model[[i]] = lm$coefficients
+}
+
+#the final regression table
+individualRegression = as.data.frame(matrix(unlist(model),nrow = 200, byrow=T))
+names(individualRegression) = names(model[[1]])
+individualRegression = cbind(distinct(conjointData,ID),individualRegression)
+
+#predict the NAs
+for(id in 1:200){
+    conjointData[conjointData$ID==id,][which(is.na(conjointData[conjointData$ID == id,]$rating)),]$rating = 
+        individualRegression[individualRegression$ID==id,]$`(Intercept)`+
+        individualRegression[individualRegression$ID==id,]$price_low*conjointData[conjointData$ID==id,][which(is.na(conjointData[conjointData$ID == id,]$rating)),]$price_low+
+        individualRegression[individualRegression$ID==id,]$height_26*conjointData[conjointData$ID==id,][which(is.na(conjointData[conjointData$ID == id,]$rating)),]$height_26+
+        individualRegression[individualRegression$ID==id,]$motion_rocking*conjointData[conjointData$ID==id,][which(is.na(conjointData[conjointData$ID == id,]$rating)),]$motion_rocking+
+        individualRegression[individualRegression$ID==id,]$style_glamorous*conjointData[conjointData$ID==id,][which(is.na(conjointData[conjointData$ID == id,]$rating)),]$style_glamorous    
+}
+
+individualRegression$ID = NULL
+```
+
+With the predicted ratings and part-utilites for each consumer, we can perform a post-hoc cluster analysis via K-Means clustering. 
+
+First, load the function and then perform the cluster analysis to give optimal number of clusters.
+
+```{r cluster function and optimal clusters}
+clustTest = function(toClust,print=TRUE,scale=TRUE,maxClusts=15,seed=12345,nstart=20,iter.max=100){
+    if(scale){ toClust = scale(toClust);}
+    set.seed(seed);   # set random number seed before doing cluster analysis
+    wss <- (nrow(toClust)-1)*sum(apply(toClust,2,var))
+    for (i in 2:maxClusts) wss[i] <- sum(kmeans(toClust,centers=i,nstart=nstart,iter.max=iter.max)$withinss)
+    ##gpw essentially does the following plot using wss above. 
+    #plot(1:maxClusts, wss, type="b", xlab="Number of Clusters",ylab="Within groups sum of squares")
+    gpw = fviz_nbclust(toClust,kmeans,method="wss",iter.max=iter.max,nstart=nstart,k.max=maxClusts) #alternative way to get wss elbow chart.
+    pm1 = pamk(toClust,scaling=TRUE)
+    ## pm1$nc indicates the optimal number of clusters based on 
+    ## lowest average silhoutte score (a measure of quality of clustering)
+    #alternative way that presents it visually as well.
+    gps = fviz_nbclust(toClust,kmeans,method="silhouette",iter.max=iter.max,nstart=nstart,k.max=maxClusts) 
+    if(print){
+        grid.arrange(gpw,gps, nrow = 1)
+    }
+    list(wss=wss,pm1=pm1$nc,gpw=gpw,gps=gps)
+}
+##Runs a set of clusters as kmeans
+##Arguments:
+##  toClust, data.frame with data to cluster
+##  nClusts, vector of number of clusters, each run as separate kmeans 
+##  ... some additional arguments to be passed to clusters
+##Return:
+##  list of 
+##    kms, kmeans cluster output with length of nClusts
+##    ps, list of plots of the clusters against first 2 principle components
+runClusts = function(toClust,nClusts,print=TRUE,maxClusts=15,seed=12345,nstart=20,iter.max=100){
+    if(length(nClusts)>4){
+        warning("Using only first 4 elements of nClusts.")
+    }
+    kms=list(); ps=list();
+    for(i in 1:4){
+        kms[[i]] = kmeans(toClust,nClusts[i],iter.max = iter.max, nstart=nstart)
+        ps[[i]] = fviz_cluster(kms[[i]], geom = "point", data = toClust) + ggtitle(paste("k =",nClusts[i]))
+        
+    }
+    library(gridExtra)
+    if(print){
+        tmp = marrangeGrob(ps, nrow = 2,ncol=2)
+        print(tmp)
+    }
+    list(kms=kms,ps=ps)
+}
+
+##Plots a kmeans cluster as three plot report
+##  pie chart with membership percentages
+##  ellipse plot that indicates cluster definitions against principle components
+##  barplot of the cluster means
+plotClust = function(km,toClust,discPlot=FALSE){
+    nc = length(km$size)
+    if(discPlot){par(mfrow=c(2,2))}
+    else {par(mfrow=c(3,1))}
+    percsize = paste(1:nc," = ",format(km$size/sum(km$size)*100,digits=2),"%",sep="")
+    pie(km$size,labels=percsize,col=1:nc)
+    
+    clusplot(toClust, km$cluster, color=TRUE, shade=TRUE,
+             labels=2, lines=0,col.clus=1:nc); #plot clusters against principal components
+    
+    if(discPlot){
+        plotcluster(toClust, km$cluster,col=km$cluster); #plot against discriminant functions ()
+    }
+    rng = range(km$centers)
+    dist = rng[2]-rng[1]
+    locs = km$centers+.05*dist*ifelse(km$centers>0,1,-1)
+    bm = barplot(km$centers,beside=TRUE,col=1:nc,main="Cluster Means",ylim=rng+dist*c(-.1,.1))
+    text(bm,locs,formatC(km$centers,format="f",digits=1))
+}
+
+Checks=clustTest(individualRegression,print=TRUE,scale=TRUE,maxClusts=15,seed=12345,nstart=20,iter.max=100)
+clusts=runClusts(individualRegression,c(2,3,4,5),print=TRUE,maxClusts=15,seed=12345,nstart=20,iter.max=100)
+plotClust(clusts[[1]][[2]],individualRegression)
+
+```
+
+Now to actually perform the K-Means cluster analysis and the output plot will show the optimal clusters. 
+
+```{r run k-means cluster analysis}
+#Run K-means cluster analysis
+clusts=runClusts(individualRegression,c(2,3,4,5),print=TRUE,maxClusts=15,seed=12345,nstart=20,iter.max=100)
+```
+
+Now plot our clusters to look at the attributes of each.
+
+```{r plot k-means cluster analysis}
+#Run K-means cluster analysis
+plotClust(clusts[[1]][[2]],individualRegression)
+```
+
+Now we add demograhic data to the conjoin data
+
+```{r add demographic data to conjoint data}
+#Join demographic data onto conjointData
+merge_df = merge(conjointData, respondentData, by = 'ID', all.x = TRUE)
+
+#test whether the priori segments are significant 
+significanceAge = lm(rating~(price_low+height_26+motion_rocking+style_glamorous)*age,data = merge_df)
+summary(significanceAge)
+#age will affect the part utilities of height and motion
+
+significanceGender = lm(rating~(price_low+height_26+motion_rocking+style_glamorous)*gender,data = merge_df)
+summary(significanceGender)
+#gender will affect the part utilities of all attribute
+
+lm_female = lm(rating~.-ID-profile-gender-age, data = merge_df[merge_df$gender == 1,])
+lm_male = lm(rating~.-ID-profile-gender-age, data = merge_df[merge_df$gender == 0,])
+par(mfrow = c(1, 2))
+barplot(lm_female$coefficients[-1])
+barplot(lm_male$coefficients[-1])
+# felame's preference is as the same as cluster3's , 
+# male's preference is as the same as cluster1's
+
+lm_34 = lm(rating~.-ID-profile-gender-age, data = merge_df[merge_df$age == 1,])
+lm_2 = lm(rating~.-ID-profile-gender-age, data = merge_df[merge_df$age == 0,])
+par(mfrow = c(1, 2))
+barplot(lm_34$coefficients[-1])
+barplot(lm_2$coefficients[-1])
+#other new products can be designed to match different age groups' preference
+
+```
+
+Merge cluster data and load financial/marketshare data
+```{r cluster and financial data}
+#join cluster data into individual regression
+clusts$kms[[2]][1]
+individualRegression$segmentation = unlist(clusts$kms[[2]][1])
+individualRegression$gender = NA
+for (i in 1:200){
+    individualRegression[i,]$gender = respondentData[i,]$gender
+}
+table(individualRegression$gender,individualRegression$segmentation)
+# can explain why female and cluster3 have the same preference, and male and #cluster1 have the same preference
+#    1  2  3
+# 0 49 29 14
+# 1 31 24 53
+# female - cluster3, because most of them are female
+# male - cluster1, beacuase most of them are male
+# so we can definitely launch product1 and product3
+
+# Round conjointData - Ratings to nearest 5
+mround = function(x,base){
+    base*round(x/base)}
+
+conjointData$rating = mround(conjointData$rating, 5)
+
+#Complete Ratings
+library("reshape")
+cast_rating = cast(conjointData[1:3],ID~profile)
+cast_rating = cast_rating[-1]
+
+
+simFCDecisions = function(scen,data){ 
+    inmkt = data[,scen] #construct the subsetted matrix of options
+    len = length(scen)
+    inmkt$bestOpts = apply(inmkt,1,max)
+    for (i in 1:200){
+        inmkt[i,1:len] = (inmkt[i,1:len] == inmkt$bestOpts[i])
+        inmkt[i,1:len] = inmkt[i,1:len]/sum(inmkt[i,1:len])
+    }
+    
+    ret = inmkt[1:len]
+    names(ret) = names(inmkt[1:len])
+    ret #decisions
+}
+
+calcUnitShares = function(decisions){
+    round(colSums(decisions)/sum(decisions),2) #assumes that total decisions is market size
+}
+
+simFCShares=function(scen,data){
+    decs = simFCDecisions(scen,data) #determine decisions
+    calcUnitShares(decs) #calculate shares and return
+}
+
+simFCScenarios = function(scenarios,data,...){
+    res = matrix(nrow=length(scenarios),ncol=length(data)) #sets everything to NA by default
+    for(i in 1:length(scenarios)){ ##loop over scenarios
+        res[i, scenarios[[i]] ] = simFCShares(scenarios[[i]],data,...)##  calculate market shares and save to right columns in res for the scenario
+    }
+    res = as.data.frame(res); names(res) = names(data)
+    res ##return result table
+}
+
+#Design new products according to different segmentaions' preference
+#p1 for cluster1
+p1 = unique(conjointData$profile[conjointData$price_low==1&conjointData$height_26==1&conjointData$motion_rocking==0&conjointData$style_glamorous==0])
+names(cast_rating)[p1] = 'p1'
+#p2E for cluster2(exsiting)
+p2E = unique(conjointData$profile[conjointData$price_low==0&conjointData$height_26==0&conjointData$motion_rocking==1&conjointData$style_glamorous==1])
+names(cast_rating)[p2E] = 'p2E'
+#p3 for cluster3
+p3 = unique(conjointData$profile[conjointData$price_low==1&conjointData$height_26==1&conjointData$motion_rocking==1&conjointData$style_glamorous==1])
+names(cast_rating)[p3] = 'p3'
+#current exsiting product
+pE = unique(conjointData$profile[conjointData$price_low==0&conjointData$height_26==0&conjointData$motion_rocking==1&conjointData$style_glamorous==0])
+names(cast_rating)[pE] = 'pE'
+#p4 for age 3-4
+p4 = unique(conjointData$profile[conjointData$price_low==1&conjointData$height_26==1&conjointData$motion_rocking==0&conjointData$style_glamorous==1])
+names(cast_rating)[p4] = 'p4'
+#p2L try to lower the price for cluster2(lower price version p2E)
+p2L = unique(conjointData$profile[conjointData$price_low==1&conjointData$height_26==0&conjointData$motion_rocking==1&conjointData$style_glamorous==1])
+names(cast_rating)[p2L] = 'p2L'
+
+#c1 competitor's current product
+c1 = unique(conjointData$profile[conjointData$price_low==0&conjointData$height_26==1&conjointData$motion_rocking==1&conjointData$style_glamorous==0])
+names(cast_rating)[c1] = 'c1'
+#c2 competitor might lower price
+c2 = unique(conjointData$profile[conjointData$price_low==1&conjointData$height_26==1&conjointData$motion_rocking==1&conjointData$style_glamorous==0])
+names(cast_rating)[c2] = 'c2'
+
+#load finance data and join it into profiles data
+financeData = data.frame(product = c('profile', 'VC','price','margin'), p1 = c(4,29,96,67),
+           p2E = c(13,33,112,79),
+           p3 = c(15,41,112,71),
+           pE = c(5,33,112,79),
+           p4 = c(12,29,96,67),
+           p5 = c(14,33,96,63),
+           c1 = c(7,41,112,71),
+           c2.low = c(8,41,96,55)
+           )
+selectNum = c(p1,p2E,p3,pE,p4,c1,c2)
+profilesData$margin = NA
+profilesData[selectNum,]$margin = unlist(financeData[4,c(2,3,4,5,6,8,9)])
+profilesData[p2L,]$margin = unlist(financeData[4,3])
+```
+
+Now we check to see competitions decisions:
+
+In current situation:
+```{r will competitor lower price in current situation}
+##################################################################################
+#we need to judge if our competitor will lower its price
+#simulation:In current situation(c1,p2E,pE),if the competitor lower its #price(c1->c2)
+scens1 = list()
+scens1[[1]]=c(c1,p2E,pE)
+scens1[[2]]=c(c2,p2E,pE)
+simFCScenarios(scens1,cast_rating)
+df1 = as.data.frame(simFCScenarios(scens1,cast_rating))
+df1$mkshare = NA
+df1[1,]$mkshare = rowSums(df1[1,-c1],na.rm = T)
+df1[2,]$mkshare = rowSums(df1[2,-c2],na.rm = T)
+#calculate our margin
+myProduct = c(p1,p2E,p3,pE,p4,p2L)
+df1$margin = NA
+for(r in 1:nrow(df1)){
+    df1[r,]$margin = sum(profilesData[myProduct ,]$margin*df1[r,myProduct]*4000,na.rm = T)
+    
+}
+
+#calculate the FC and profit for 1st year 
+#Costs = 20,000/year * #products + $20,000/3 *#products not in existing set
+newProduct = c(p1,p3,p4,p2L)
+df1$firstYearFC = NA
+for (r in 1:nrow(df1)){
+    df1[r,]$firstYearFC = sum(sum(!is.na(df1[r,myProduct]))*20000)+sum(sum(!is.na(df1[r,newProduct]))*6667)
+}
+df1$firstYearProfit = df1$margin-df1$firstYearFC
+
+#profit after first year
+df1$laterYearFC = NA
+for (r in 1:nrow(df1)){
+    df1[r,]$laterYearFC = sum(sum(!is.na(df1[r,myProduct]))*20000)
+}
+df1$laterYearProfit = df1$margin-df1$laterYearFC
+
+#calculate the profit for competitor
+c1
+df1$comMargin = NA
+df1[1,]$comMargin = sum(profilesData[c1 ,]$margin*df1[1,c1]*4000,na.rm = T)
+c2
+df1[2,]$comMargin = sum(profilesData[c2 ,]$margin*df1[2,c2]*4000,na.rm = T)
+    
+df1$comCurrentFC = 20000
+
+df1$comCurrentProfit = df1$comMargin-df1$comCurrentFC
+df1
+#we found that the competitor's profit will increase 
+#so in current situation(c1,p2E,pE),our competitor will lower its price(switch c1 to c2)
+#write.csv(df1,'c1toc2InCurrentMk.csv')
+```
+The competitor should lower his price in the curretn sitation.
+
+
+Check optimal product combination with competitors current price.
+```{r Check profitability of products with c1}
+#what if our competitor will take actions, after we launching the best products?
+scens2 = list()
+scens2[[1]]=c(c1,p2E,pE) 
+scens2[[2]]=c(c1,p2E) 
+scens2[[3]]=c(c1,pE)
+#we can find that p2E performed better(higher market share), so consider to drop pE
+scens2[[4]]=c(c1,p2E,p1)    
+scens2[[5]]=c(c1,p2E,p3)    
+scens2[[6]]=c(c1,p2E,p1,p3) 
+scens2[[7]]=c(c1,p1,p3)     
+scens2[[8]]=c(c1,p2E,p4)     
+scens2[[9]]=c(c1,p2E,p2L)     
+scens2[[10]]=c(c1,p2E,p4,p2L) 
+scens2[[11]]=c(c1,p1,p4)
+scens2[[12]]=c(c1,p1,p2L)     
+scens2[[13]]=c(c1,p3,p4)     
+scens2[[14]]=c(c1,p3,p2L)
+scens2[[15]]=c(c1,p2E,p1,p4)
+scens2[[16]]=c(c1,p2E,p1,p2L)
+scens2[[17]]=c(c1,p2E,p3,p4)
+scens2[[18]]=c(c1,p1,p3,p4)
+scens2[[19]]=c(c1,p1,p3,p2L)
+scens2[[20]]=c(c1,p3,p4,p2L)
+df2 = as.data.frame(simFCScenarios(scens2,cast_rating))
+df2$mkshare = rowSums(df2[-c1],na.rm = T)
+
+#calculate our margin
+myProduct = c(p1,p2E,p3,pE,p4,p2L)
+df2$margin = NA
+for(r in 1:nrow(df2)){
+    df2[r,]$margin = sum(profilesData[myProduct ,]$margin*df2[r,myProduct]*4000,na.rm = T)
+    
+}
+
+#calculate the FC and profit for 1st year 
+#Costs = 20,000/year * #products + $20,000/3 *#products not in existing set
+newProduct = c(p1,p3,p4) #p2L is not a new product because we just lower the price of p2E to get it 
+df2$firstYearFC = NA
+for (r in 1:nrow(df2)){
+    df2[r,]$firstYearFC = sum(sum(!is.na(df2[r,myProduct]))*20000)+sum(sum(!is.na(df2[r,newProduct]))*6667)
+}
+df2$firstYearProfit = df2$margin-df2$firstYearFC
+
+#profit after first year
+df2$laterYearFC = NA
+for (r in 1:nrow(df2)){
+    df2[r,]$laterYearFC = sum(sum(!is.na(df2[r,myProduct]))*20000)
+}
+df2$laterYearProfit = df2$margin-df2$laterYearFC
+
+#calculate the profit for competitor
+c1
+df2$comMargin = NA
+for(r in 1:nrow(df2)){
+    df2[r,]$comMargin = sum(profilesData[c1 ,]$margin*df2[r,c1]*4000,na.rm = T)
+    
+}
+df2$comCurrentFC = NA
+for (r in 1:nrow(df2)){
+    df2[r,]$comCurrentFC = sum(sum(!is.na(df2[r,c1]))*20000)
+}
+df2$comCurrentProfit = df2$comMargin-df2$comCurrentFC
+df2
+#write.csv(df2,'currentMk.csv')
+#we found that in current market(competitor sells c1),launching p2L and p3 can get the highest profit
+```
+
+Launching p2L and p3 is most profitable if competitors does not lower his price. (But he likely will.)
+
+
+Now check competitors profit in scenarios given he lowers his price.
+```{r }
+scens3 = list()
+scens3[[1]]=c(c2,p2L,p3)       
+df3 = as.data.frame(simFCScenarios(scens3,cast_rating))
+df3$mkshare = rowSums(df3[-c2],na.rm = T)
+
+#calculate our margin
+myProduct = c(p1,p2E,p3,pE,p4,p2L)
+df3$margin = NA
+for(r in 1:nrow(df3)){
+    df3[r,]$margin = sum(profilesData[myProduct ,]$margin*df3[r,myProduct]*4000,na.rm = T)
+    
+}
+
+#calculate the FC and profit for 1st year 
+#Costs = 20,000/year * #products + $20,000/3 *#products not in existing set
+newProduct = c(p1,p3,p4)
+df3$firstYearFC = NA
+for (r in 1:nrow(df3)){
+    df3[r,]$firstYearFC = sum(sum(!is.na(df3[r,myProduct]))*20000)+sum(sum(!is.na(df3[r,newProduct]))*6667)
+}
+df3$firstYearProfit = df3$margin-df3$firstYearFC
+
+#profit after first year
+df3$laterYearFC = NA
+for (r in 1:nrow(df3)){
+    df3[r,]$laterYearFC = sum(sum(!is.na(df3[r,myProduct]))*20000)
+}
+df3$laterYearProfit = df3$margin-df3$laterYearFC
+
+#calculate the profit for competitor
+c2
+df3$comMargin = NA
+for(r in 1:nrow(df3)){
+    df3[r,]$comMargin = sum(profilesData[c2 ,]$margin*df3[r,c2]*4000,na.rm = T)
+    
+}
+
+df3$comCurrentFC = NA
+for (r in 1:nrow(df3)){
+    df3[r,]$comCurrentFC = sum(sum(!is.na(df3[r,c2]))*20000)
+}
+
+df3$comCurrentProfit = df3$comMargin-df3$comCurrentFC
+df3
+# write.csv(df3,'afterP2LP3Launch.csv')
+#obviously if we launch p2L and p3, then lowering price(changing c1 to c2) can increase competitor's profit
+#so we can tell that in whatever situation, our competitor must lower its price
+#and we can just focous on the situation that our competitor launch c2(figure out the optimal product combinations when competitor launch c2)
+
+```
+
+The competitors makes a higher profit with a lower price in every scenario, so we can conclude he will likely lower his price.
+
+Now we can run market share/ profitability scenarios assuming the competitor lowers his price.
+``` {r optimal product offerings}
+######market simulation when competitor sells c2########
+scens4 = list()
+scens4[[1]]=c(c2,p2E,pE) 
+scens4[[2]]=c(c2,p2E) 
+scens4[[3]]=c(c2,pE)
+#we can find that p2E performed better(higher mk share), so we consider to drop pE
+scens4[[4]]=c(c2,p2E,p1)    
+scens4[[5]]=c(c2,p2E,p3)    
+scens4[[6]]=c(c2,p2E,p1,p3) 
+scens4[[7]]=c(c2,p1,p3)     
+scens4[[8]]=c(c2,p2E,p4)     
+scens4[[9]]=c(c2,p2E,p2L)     
+scens4[[10]]=c(c2,p2E,p4,p2L) 
+scens4[[11]]=c(c2,p1,p4)
+scens4[[12]]=c(c2,p1,p2L)     
+scens4[[13]]=c(c2,p3,p4)     
+scens4[[14]]=c(c2,p3,p2L)
+scens4[[15]]=c(c2,p2E,p1,p4)
+scens4[[16]]=c(c2,p2E,p1,p2L)
+scens4[[17]]=c(c2,p2E,p3,p4)
+scens4[[18]]=c(c2,p1,p3,p4)
+scens4[[19]]=c(c2,p1,p3,p2L)
+scens4[[20]]=c(c2,p3,p4,p2L)
+df4 = as.data.frame(simFCScenarios(scens4,cast_rating))
+df4$mkshare = rowSums(df4[-c2],na.rm = T)
+#calculate our margin
+myProduct = c(p1,p2E,p3,pE,p4,p2L)
+df4$margin = NA
+for(r in 1:nrow(df4)){
+    df4[r,]$margin = sum(profilesData[myProduct ,]$margin*df4[r,myProduct]*4000,na.rm = T)
+    
+}
+
+#calculate the FC and profit for 1st year 
+#Costs = 20,000/year * #products + $20,000/3 *#products not in existing set
+newProduct = c(p1,p3,p4)
+df4$firstYearFC = NA
+for (r in 1:nrow(df4)){
+    df4[r,]$firstYearFC = sum(sum(!is.na(df4[r,myProduct]))*20000)+sum(sum(!is.na(df4[r,newProduct]))*6667)
+}
+df4$firstYearProfit = df4$margin-df4$firstYearFC
+
+#profit after first year
+df4$laterYearFC = NA
+for (r in 1:nrow(df4)){
+    df4[r,]$laterYearFC = sum(sum(!is.na(df4[r,myProduct]))*20000)
+}
+df4$laterYearProfit = df4$margin-df4$laterYearFC
+
+#calculate the profit for competitor
+c2
+df4$comMargin = NA
+for(r in 1:nrow(df4)){
+    df4[r,]$comMargin = sum(profilesData[c2 ,]$margin*df4[r,c2]*4000,na.rm = T)
+    
+}
+
+df4$comCurrentFC = NA
+for (r in 1:nrow(df4)){
+    df4[r,]$comCurrentFC = sum(sum(!is.na(df4[r,c2]))*20000)
+}
+
+df4$comCurrentProfit = df4$comMargin-df4$comCurrentFC
+df4
+#write.csv(df4,'finalResult.csv')
+#if the competitor launch c2, we should launch p1, p2L, and p3 to generate the highest profits
+
+```
+
+Finally, we see the highest estimated profit is from offering 3 new products (dropping our current selection).
+
+These products are p1,p3, and p2L
+p1: Low Price, 26 inches, bouncing, and racing
+p2: Low price, 26 inches, rocking, and glamorous
+p2L: Low price, 18inches, rocking, and glamorous
